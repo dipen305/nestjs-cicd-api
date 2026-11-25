@@ -1,0 +1,67 @@
+
+name: NestJS CD
+
+on:
+  workflow_run:
+    workflows:
+      - NestJS CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy using SSH
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          GHCR_USER: ${{ secrets.GHCR_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+          ssh "$USER@$HOST" \
+            "mkdir -p ~/nestjs-cicd-api"
+
+          ssh "$USER@$HOST" \
+            "echo '$GHCR_TOKEN' | docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+
+          ssh "$USER@$HOST" \
+            "cd ~/nestjs-cicd-api && echo '$IMAGE' > .image"
+
+          ssh "$USER@$HOST" \
+            "cd ~/nestjs-cicd-api && docker pull '$IMAGE'"
+
+          ssh "$USER@$HOST" \
+            "cd ~/nestjs-cicd-api && docker rm -f nestjs-cicd-api || true"
+
+          ssh "$USER@$HOST" \
+            "cd ~/nestjs-cicd-api && docker run -d \
+            --name nestjs-cicd-api \
+            --restart unless-stopped \
+            -p 3000:3000 \
+            '$IMAGE'"
+
+          ssh "$USER@$HOST" \
+            "for i in \$(seq 1 20); do \
+              if curl -fsS http://localhost:3000/api/health; then exit 0; fi; \
+              sleep 3; \
+            done; exit 1"
